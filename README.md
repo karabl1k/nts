@@ -31,7 +31,7 @@ nts/
 ├── calc.py                    # Вычисление растров
   ├── NDVICalculator             # Вычисление растра на основе RED и NIR каналов Landsat и Sentinel
   ├── CloudMasker                # Вычисление растра на основе RED, NIR и маски облаков Landsat и Sentinel
-  ├── ClippedNdarrayIterator     # Итератор по массивам обрезанных растров (yield ndarray, meta, fid, culture)
+  ├── ClippedNdarrayIterator     # Итератор по массивам обрезанных растров (yield ndarray, profile, fid, culture)
 ├── DB.py                      # Работа с базой данных
   ├── DataBaseReader             # Класс методы которого используются в основном для чтения базы данных
   ├── DataBaseWriter             # Класс методы которого используются в основном для записи в базу данных
@@ -119,9 +119,9 @@ import os
 iterator = ClippedNdarrayIterator(path_dir, gpkg_path)
 date = iterator.get_date()
 
-for ndarray, meta, fid, culture in iterator:
+for ndarray, profile, fid, culture in iterator:
     path = os.path.join(out_dir, f"{culture}_{fid}_{date}.tif")
-    with rasterio.open(path, "w", **meta) as dst:
+    with rasterio.open(path, "w", **profile) as dst:
         dst.write(ndarray)
 ```
 
@@ -141,8 +141,8 @@ import os
 writer = DatabaseWriter(gpkg_path)
 iterator = ClippedNdarrayIterator(path_dir, gpkg_path)
 
-for ndarray, meta, fid, culture in iterator:
-    nodata = meta["nodata"]
+for ndarray, profile, fid, culture in iterator:
+    nodata = profile["nodata"]
     masked = np.ma.masked_equal(ndarray, nodata)
     mean_val = masked.mean()
 
@@ -168,4 +168,4 @@ for ndarray, meta, fid, culture in iterator:
 <img src="imgs/img7.png" width="720" height="500" />
 </p>
 
-Далее полученный график можно эскопртировать.
+Далее полученный график можно экспортировать.

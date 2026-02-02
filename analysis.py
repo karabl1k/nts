@@ -4,9 +4,10 @@ import sqlite3
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.interpolate import make_interp_spline
 from pandas import Series
 from typing import cast
+from scipy.signal import savgol_filter
+
 
 class CSVExporterAll:
     """
@@ -231,51 +232,8 @@ class CSVExporter:
             print("Ошибка при экспорте CSV:", e)
             raise
 
-class NDVIPlotter:
-    """
-    Класс для анализа, обработки и визуализации временных рядов NDVI.
+class NDVIPlotterMethods:
 
-    Класс предназначен для работы с результатами расчёта NDVI,
-    сохранёнными в GeoPackage / SQLite базе данных. Он предоставляет
-    инструменты для:
-
-    - получения списка культур и идентификаторов полей (FID)
-    - фильтрации выбросов NDVI
-    - сглаживания временных рядов
-    - объединения нескольких кривых NDVI
-    - вычисления среднего временного ряда
-    - визуализации и экспорта графиков
-
-    Данные извлекаются из таблицы ``results`` и обрабатываются в формате
-    ``pandas.DataFrame``.
-
-    Notes
-    -----
-    Ожидается, что таблица ``results`` содержит следующие поля:
-
-    - ``fid`` : int or str
-        Идентификатор поля.
-    - ``date`` : str or datetime
-        Дата наблюдения.
-    - ``culture`` : str
-        Название культуры.
-    - ``ndvi`` : float
-        Значение NDVI.
-
-    Все операции чтения выполняются в режиме только чтения.
-    Класс не изменяет содержимое базы данных.
-
-    Attributes
-    ----------
-    conn : sqlite3.Connection
-        Активное соединение с базой данных.
-
-    Examples
-    --------
-    >>> plotter = NDVIPlotter("results.gpkg")
-    >>> cultures = plotter.get_cultures()
-    >>> fig, ax = plotter.plot_culture(culture="wheat")
-    """
     def __init__(self, gpkg_path):
         try:
             self.conn = sqlite3.connect(gpkg_path)
@@ -408,101 +366,132 @@ class NDVIPlotter:
             print("Ошибка фильтрации данных:", e)
             raise
 
-    def smooth(self, df, num=500):
+    def interpolate(self, df, num=None, interpolate_window_divisor=10, polyorder=2):
         """
-        Выполняет сглаживание временного ряда NDVI с помощью сплайна.
-
-        Используется интерполяция B-сплайном по временной оси.
+        Выполняет сглаживание временного ряда NDVI с помощью фильтра Савицкого-Голея.
 
         Parameters
         ----------
         df : pandas.DataFrame
             Таблица с колонками ``date`` и ``ndvi``.
         num : int, optional
-            Количество точек в сглаженном ряду.
-
-        Returns
-        -------
-        pandas.DataFrame
-            DataFrame с колонками ``date`` и ``ndvi`` для сглаженного ряда.
-
-        Raises
-        ------
-        ValueError
-            Если недостаточно точек для сглаживания.
-        Exception
-            При ошибке интерполяции.
+            Количество точек в итоговом сглаженном ряду.
+        window_length : int, optional
+            Длина окна фильтра (должна быть нечетной).
+        polyorder : int, optional
+            Степень полинома для аппроксимации.
         """
         try:
-            df = df[["date", "ndvi"]].dropna()
+            df = df[["date", "ndvi"]].dropna().copy()
 
-            if len(df) < 4:
-                raise ValueError("Недостаточно точек для сглаживания")
+            if len(df) < 5:
+                raise ValueError("Слишком мало точек для выбранной степени полинома.")
 
-            df = df.sort_values("date")
-            df = df.drop_duplicates(subset="date")
+            df = df.sort_values("date").drop_duplicates(subset="date")
 
-            x = df["date"]
-            y = df["ndvi"].astype(float)
+            if len(df) < 5:
+                raise ValueError("Слишком мало данных для анализа")
 
-            x_num = (x - x.min()).dt.days.to_numpy()
-            y = y.to_numpy()
+            full_range = pd.date_range(start=df["date"].min(), end=df["date"].max(), freq='D')
+            temp_df = pd.DataFrame({"date": full_range})
+            df = pd.merge(temp_df, df, on="date", how="left")
 
-            k = min(3, len(x_num) - 1)
+            y_interp = df["ndvi"].interpolate(method='linear').bfill().ffill().to_numpy()
 
-            spline = make_interp_spline(x_num, y, k=k)
+            fraction = interpolate_window_divisor / 100
+            window_length = int(len(y_interp) * fraction)
+            window_length = max(3, window_length)
 
-            X_ = np.linspace(x_num.min(), x_num.max(), num)
-            Y_ = spline(X_)
+            if window_length % 2 == 0:
+                window_length += 1
+            y_interpolated = savgol_filter(y_interp, window_length=window_length, polyorder=polyorder)
 
-            dates_interp = x.min() + pd.to_timedelta(X_, unit="D")
+            x_numeric = np.linspace(0, len(y_interpolated) - 1, num)
+            y_final = np.interp(x_numeric, np.arange(len(y_interpolated)), y_interpolated)
 
-            smoothed_df = pd.DataFrame({
-                "date": dates_interp,
-                "ndvi": Y_
+            dates_final = pd.date_range(start=df["date"].min(), end=df["date"].max(), periods=num)
+
+            return pd.DataFrame({
+                "date": dates_final,
+                "ndvi": y_final
             })
 
-            return smoothed_df
-
         except Exception as e:
-            print("Ошибка сглаживания:", e)
+            print(f"Ошибка сглаживания Савицкого-Голея: {e}")
             raise
 
-    def compute_data(
-        self,
-        culture,
-        filter_neighbor_flag=True,
-        neighbor_thresh=0.01,
-        fids=None,
-        smooth=False,
-        smooth_num=500,
-        start_date=None,
-        end_date=None
-    ):
+class NDVIPlotter(NDVIPlotterMethods):
+    """
+    Класс для анализа, обработки и визуализации временных рядов NDVI.
+
+    Класс предназначен для работы с результатами расчёта NDVI,
+    сохранёнными в GeoPackage / SQLite базе данных. Он предоставляет
+    инструменты для:
+
+    - получения списка культур и идентификаторов полей (FID)
+    - фильтрации выбросов NDVI
+    - сглаживания временных рядов
+    - объединения нескольких кривых NDVI
+    - вычисления среднего временного ряда
+    - визуализации и экспорта графиков
+
+    Данные извлекаются из таблицы ``results`` и обрабатываются в формате
+    ``pandas.DataFrame``.
+
+    Parameters
+    ----------
+    gpkg_path : str
+        Путь к базе данных.
+    Notes
+    -----
+    Ожидается, что таблица ``results`` содержит следующие поля:
+
+    - ``fid`` : int or str
+        Идентификатор поля.
+    - ``date`` : str or datetime
+        Дата наблюдения.
+    - ``culture`` : str
+        Название культуры.
+    - ``ndvi`` : float
+        Значение NDVI.
+
+    Все операции чтения выполняются в режиме только чтения.
+    Класс не изменяет содержимое базы данных.
+
+    Attributes
+    ----------
+    conn : sqlite3.Connection
+        Активное соединение с базой данных.
+    """
+    def __init__(self, gpkg_path):
+        super().__init__(gpkg_path)
+        self.DEFAULT_PARAMS = {
+            'filter_neighbor_flag': True,
+            'neighbor_thresh': None,
+
+            'interpolate': False,
+            'interpolate_num': None,
+            'interpolate_window_divisor': None,
+
+            'start_date': None,
+            'end_date': None,
+
+            'show_raw_points': True,
+            'show_removed': False,
+            'mean_curve': True,
+
+            'line_color': None,
+            'mean_color': "red",
+
+            'fig_size': (12, 6)
+    }
+
+    def compute_data(self, culture, fids=None, **kwargs):
         """
         Вычисляет и подготавливает временные ряды NDVI для выбранной культуры.
 
         Поддерживает фильтрацию выбросов, сглаживание, агрегацию
         и расчёт среднего временного ряда.
-
-        Parameters
-        ----------
-        culture : str
-            Название культуры.
-        filter_neighbor_flag : bool, optional
-            Применять ли фильтрацию выбросов по соседним значениям.
-        neighbor_thresh : float, optional
-            Порог фильтрации выбросов NDVI.
-        fids : list, tuple, numpy.ndarray or str, optional
-            Идентификаторы полей (FID). Если не указано, используются все.
-        smooth : bool, optional
-            Применять ли сглаживание.
-        smooth_num : int, optional
-            Количество точек для сглаживания.
-        start_date : str or pandas.Timestamp, optional
-            Начальная дата фильтрации.
-        end_date : str or pandas.Timestamp, optional
-            Конечная дата фильтрации.
 
         Returns
         -------
@@ -527,6 +516,7 @@ class NDVIPlotter:
         Exception
             При ошибке чтения или обработки данных.
         """
+        params = {**self.DEFAULT_PARAMS, **kwargs}
 
         try:
             if fids is None:
@@ -558,21 +548,21 @@ class NDVIPlotter:
                     continue
                 df["date"] = pd.to_datetime(df["date"])
                 df["ndvi"] = df["ndvi"].astype(float)
-                if start_date:
-                    df = df[df["date"] >= pd.to_datetime(start_date)]
-                if end_date:
-                    df = df[df["date"] <= pd.to_datetime(end_date)]
+                if params["start_date"]:
+                    df = df[df["date"] >= pd.to_datetime(params["start_date"])]
+                if params["end_date"]:
+                    df = df[df["date"] <= pd.to_datetime(params["end_date"])]
                 df = df.reset_index(drop=True)
                 raw[fid] = df.copy()
                 removed_fid = pd.DataFrame(columns=["date", "ndvi_removed"])
-                if filter_neighbor_flag:
-                    df, removed_tmp = self.filter_neighbor(df, neighbor_thresh)
+                if params["filter_neighbor_flag"]:
+                    df, removed_tmp = self.filter_neighbor(df, params["neighbor_thresh"])
                     if removed_fid.empty:
                         removed_fid = removed_tmp.copy()
                     elif not removed_tmp.dropna(how="all").empty:
                         removed_fid = pd.concat([removed_fid, removed_tmp], ignore_index=True)
-                if smooth:
-                    df = self.smooth(df, num=smooth_num)
+                if params["interpolate"]:
+                    df = self.interpolate(df, num=params["interpolate_num"], interpolate_window_divisor=params["interpolate_window_divisor"])
                 df = df.reset_index(drop=True)
                 series = df.set_index("date")["ndvi"]
                 series.name = f"fid_{fid}"
@@ -585,47 +575,16 @@ class NDVIPlotter:
             mean_series = None
             if merged is not None and not merged.empty:
                 mean_series = merged.mean(axis=1)
-            return {"fids": list(curves.keys()), "curves": curves, "raw": raw, "removed": removed, "merged": merged, "mean_series": mean_series}
+            return {"fids": list(curves.keys()), "curves": curves, "raw": raw, "removed": removed, "merged": merged,
+                    "mean_series": mean_series}
 
         except Exception as e:
             print("Ошибка вычисления данных:", e)
             raise
 
-    def plot_processed(
-        self,
-        processed,
-        culture,
-        fids=None,
-        show_raw_points=True,
-        show_removed=False,
-        mean_curve=True,
-        figsize=(12, 6),
-        line_color=None,
-        mean_color="red"
-    ):
+    def plot_processed(self, processed, culture, fids=None, **kwargs):
         """
         Строит график NDVI на основе предварительно обработанных данных.
-
-        Parameters
-        ----------
-        processed : dict
-            Результат работы метода ``compute_data``.
-        culture : str
-            Название культуры.
-        fids : list, optional
-            FID для отображения. Если не указано — отображаются все.
-        show_raw_points : bool, optional
-            Отображать ли исходные точки NDVI.
-        show_removed : bool, optional
-            Отображать ли удалённые выбросы.
-        mean_curve : bool, optional
-            Отображать ли среднюю кривую NDVI.
-        figsize : tuple, optional
-            Размер фигуры matplotlib.
-        line_color : str, optional
-            Цвет линий NDVI.
-        mean_color : str, optional
-            Цвет средней кривой.
 
         Returns
         -------
@@ -637,33 +596,34 @@ class NDVIPlotter:
         Exception
             При ошибке построения графика.
         """
+        params = {**self.DEFAULT_PARAMS, **kwargs}
+
         try:
             curves = processed.get("curves", {})
             raw = processed.get("raw", {})
             removed = processed.get("removed", {})
-            merged = processed.get("merged", None)
             mean_series = cast(Series, processed.get("mean_series"))
             if fids is None:
                 plot_fids = list(curves.keys())
             else:
                 plot_fids = [fid for fid in fids if fid in curves]
-            fig, ax = plt.subplots(figsize=figsize)
+            fig, ax = plt.subplots(figsize=params["fig_size"])
             if len(plot_fids) == 0:
                 return fig, ax
             removed_plotted_label = False
             for idx, fid in enumerate(plot_fids):
                 df = curves[fid]
-                if line_color is None:
+                if params["line_color"] is None:
                     ax.plot(df["date"], df["ndvi"], linewidth=1.2)
                 else:
-                    ax.plot(df["date"], df["ndvi"], linewidth=1.2, color=line_color)
-                if show_raw_points:
+                    ax.plot(df["date"], df["ndvi"], linewidth=1.2, color=params["line_color"])
+                if params["show_raw_points"]:
                     rdf = raw.get(fid)
                     if rdf is not None and not rdf.empty:
                         ax.scatter(rdf["date"], rdf["ndvi"], s=12)
-            if mean_curve and mean_series is not None:
-                ax.plot(mean_series.index, mean_series.values, linewidth=3.0, color=mean_color)
-            if show_removed:
+            if params["mean_curve"] and mean_series is not None:
+                ax.plot(mean_series.index, mean_series.values, linewidth=3.0, color=params["mean_color"])
+            if params["show_removed"]:
                 for fid in plot_fids:
                     rdf = removed.get(fid)
                     if rdf is not None and not rdf.empty:
@@ -686,172 +646,30 @@ class NDVIPlotter:
             print("Ошибка построения графика:", e)
             raise
 
-    def plot_culture(
-        self,
-        culture: str,
-        fids=None,
-
-        filter_neighbor_flag=True,
-        neighbor_thresh=0.01,
-
-        smooth=False,
-        smooth_num=500,
-
-        start_date=None,
-        end_date=None,
-
-        show_raw_points=True,
-        show_removed=False,
-        mean_curve=True,
-        line_color=None,
-        mean_color="red",
-
-        figsize = (12, 6),
-    ):
+    def plot_culture(self, culture, fids:None, **kwargs):
         """
         Полный цикл обработки и построения графика NDVI для культуры.
-
-        Parameters
-        ----------
-        culture : str
-            Название культуры.
-        fids : list, optional
-            FID для анализа.
-        filter_neighbor_flag : bool, optional
-            Фильтрация выбросов.
-        neighbor_thresh : float, optional
-            Порог фильтрации.
-        smooth : bool, optional
-            Сглаживание данных.
-        smooth_num : int, optional
-            Количество точек сглаживания.
-        start_date : str, optional
-            Начальная дата.
-        end_date : str, optional
-            Конечная дата.
-        show_raw_points : bool, optional
-            Показывать исходные точки.
-        show_removed : bool, optional
-            Показывать удалённые точки.
-        mean_curve : bool, optional
-            Показывать среднюю кривую.
-        line_color : str, optional
-            Цвет линий.
-        mean_color : str, optional
-            Цвет средней кривой.
-        figsize : tuple, optional
-            Размер графика.
 
         Returns
         -------
         tuple
             (matplotlib.figure.Figure, matplotlib.axes.Axes)
         """
-        processed = self.compute_data(
-            culture=culture,
-            filter_neighbor_flag=filter_neighbor_flag,
-            neighbor_thresh=neighbor_thresh,
-            fids=fids,
-            smooth=smooth,
-            smooth_num=smooth_num,
-            start_date=start_date,
-            end_date=end_date
-        )
-        return self.plot_processed(
-            processed=processed,
-            culture=culture,
-            fids=fids,
-            show_raw_points=show_raw_points,
-            show_removed=show_removed,
-            mean_curve=mean_curve,
-            figsize=figsize,
-            line_color=line_color,
-            mean_color=mean_color
-        )
+        params = {**self.DEFAULT_PARAMS, **kwargs}
 
-    def export_plot(
-            self,
-            culture: str,
-            filepath: str,
-            fids=None,
+        pracessed = self.compute_data(culture=culture, fids=fids, **params)
+        return self.plot_processed(pracessed, culture, fids=fids, **params)
 
-            filter_neighbor_flag=True,
-            neighbor_thresh=0.01,
-
-            smooth=False,
-            smooth_num=500,
-
-            start_date=None,
-            end_date=None,
-
-            show_raw_points=True,
-            show_removed=False,
-            mean_curve=True,
-            line_color=None,
-            mean_color="red",
-
-            figsize=(12, 6),
-            dpi=300
-    ):
+    def export_plot(self, culture, file_path, dpi=300, **kwargs):
         """
-        Экспортирует график NDVI в файл.
+       Экспортирует график NDVI в файл.
 
-        Parameters
-        ----------
-        culture : str
-            Название культуры.
-        filepath : str
-            Путь для сохранения изображения.
-        fids : list, optional
-            FID для анализа.
-        filter_neighbor_flag : bool, optional
-            Фильтрация выбросов.
-        neighbor_thresh : float, optional
-            Порог фильтрации.
-        smooth : bool, optional
-            Сглаживание данных.
-        smooth_num : int, optional
-            Количество точек сглаживания.
-        start_date : str, optional
-            Начальная дата.
-        end_date : str, optional
-            Конечная дата.
-        show_raw_points : bool, optional
-            Показывать исходные точки.
-        show_removed : bool, optional
-            Показывать удалённые точки.
-        mean_curve : bool, optional
-            Показывать среднюю кривую.
-        line_color : str, optional
-            Цвет линий.
-        mean_color : str, optional
-            Цвет средней кривой.
-        figsize : tuple, optional
-            Размер графика.
-        dpi : int, optional
-            Разрешение изображения.
+       Returns
+       -------
+       None
+       """
+        params = {**self.DEFAULT_PARAMS, **kwargs}
 
-        Returns
-        -------
-        None
-        """
-
-        fig, ax = self.plot_culture(
-            culture=culture,
-            fids=fids,
-            filter_neighbor_flag=filter_neighbor_flag,
-            neighbor_thresh=neighbor_thresh,
-            smooth=smooth,
-            smooth_num=smooth_num,
-            start_date=start_date,
-            end_date=end_date,
-            show_raw_points=show_raw_points,
-            show_removed=show_removed,
-            mean_curve=mean_curve,
-            line_color=line_color,
-            mean_color=mean_color,
-            figsize=figsize
-        )
-
-        fig.savefig(filepath, dpi=dpi, bbox_inches="tight")
+        fig, ax = self.plot_culture(culture=culture, **params)
+        fig.savefig(file_path, dpi=dpi, bbox_inches="tight")
         plt.close(fig)

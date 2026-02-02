@@ -1,5 +1,3 @@
-from pyproj import Transformer
-from shapely.ops import transform
 from rasterio.mask import mask
 from rasterio.warp import reproject, Resampling
 import os
@@ -9,6 +7,7 @@ from rasterio.io import MemoryFile
 import re
 from .DB import DatabaseReader
 from numpy import ndarray
+from rasterio.warp import transform_geom
 
 
 class NDVICalculator:
@@ -404,7 +403,7 @@ class ClippedNdarrayIterator(CloudMasker, DatabaseReader):
     ndvi_dataset_masked : rasterio.io.DatasetReader
         Объект растрового датасета с маскированным NDVI.
     _gen : list
-        Список сгенерированных кортежей (ndarray, meta, fid, culture).
+        Список сгенерированных кортежей (ndarray, profile, fid, culture).
     """
     def __init__(self, path_dir, path_db, table_name="fields"):
         CloudMasker.__init__(self, path_dir)
@@ -415,7 +414,7 @@ class ClippedNdarrayIterator(CloudMasker, DatabaseReader):
 
         self.ndvi_dataset_masked = self.rasterio_dataset(self.ndarray, self.profile)
 
-        self._gen = [(ndarray, meta, fid, culture) for ndarray, meta, fid, culture in self._img_generator()]
+        self._gen = [(ndarray, profile, fid, culture) for ndarray, profile, fid, culture in self._img_generator()]
 
     @staticmethod
     def rasterio_dataset(ndarray, profile):
@@ -458,7 +457,7 @@ class ClippedNdarrayIterator(CloudMasker, DatabaseReader):
         tuple
             - ndarray : numpy.ndarray
                 Обрезанный NDVI-массив.
-            - meta : dict
+            - profile : dict
                 Метаданные для обрезанного растрового изображения.
             - fid : int or str
                 Идентификатор полигона.
@@ -471,25 +470,23 @@ class ClippedNdarrayIterator(CloudMasker, DatabaseReader):
             При ошибках трансформации, маскирования и чтения из базы.
         """
         try:
-            transformer = Transformer.from_crs(
-                self.polygon_crs,
-                self.raster_crs,
-                always_xy=True)
-
             for geom, fid, culture in self.geom_generator():
-                geom_projected = transform(transformer.transform, geom)
-                geojson = geom_projected.__geo_interface__
+                geojson = transform_geom(
+                    self.polygon_crs,
+                    self.raster_crs,
+                    geom.__geo_interface__
+                )
 
                 ndarray, out_transform = mask(self.ndvi_dataset_masked, [geojson], crop=True)
-                meta = self.ndvi_dataset_masked.meta.copy()
-                meta.update({
+                profile = self.profile.copy()
+                profile.update({
                     "driver": "GTiff",
                     "height": ndarray.shape[1],
                     "width": ndarray.shape[2],
                     "transform": out_transform,
                     "nodata": 0
                 })
-                yield ndarray, meta, fid, culture
+                yield ndarray, profile, fid, culture
 
             self.close_db()
 
@@ -504,7 +501,7 @@ class ClippedNdarrayIterator(CloudMasker, DatabaseReader):
         Returns
         -------
         iterator
-            Итератор, возвращающий кортежи (ndarray, meta, fid, culture).
+            Итератор, возвращающий кортежи (ndarray, profile, fid, culture).
         """
         return iter(self._gen)
 

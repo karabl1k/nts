@@ -115,11 +115,10 @@ class ClipTab(ttk.Frame):
 
                 date = iterator.get_date()
 
-                for ndarray, meta, fid, culture in iterator:
+                for ndarray, profile, fid, culture in iterator:
                     path = os.path.join(out_dir, f"{culture}_{fid}_{date}.tif")
-                    with rasterio.open(path, "w", **meta) as dst:
+                    with rasterio.open(path, "w", **profile) as dst:
                         dst.write(ndarray)
-
 
             messagebox.showinfo("OK", "Clipping завершён")
         except Exception as e:
@@ -172,13 +171,18 @@ class AnalysisTab(ttk.Frame):
         self.neigh_thresh.pack(fill="x")
 
         ttk.Separator(left).pack(fill="x", pady=8)
-        self.smooth = tk.BooleanVar()
-        ttk.Checkbutton(left, text="Интерполяция", variable=self.smooth).pack(anchor="w")
+        self.interpolate = tk.BooleanVar()
+        ttk.Checkbutton(left, text="Интерполяция", variable=self.interpolate).pack(anchor="w")
 
         ttk.Label(left, text="Количество точек интерполяции").pack(anchor="w")
-        self.smooth_param = ttk.Entry(left)
-        self.smooth_param.insert(0, "500")
-        self.smooth_param.pack(fill="x")
+        self.interpolate_param = ttk.Entry(left)
+        self.interpolate_param.insert(0, "500")
+        self.interpolate_param.pack(fill="x")
+
+        ttk.Label(left, text="% точек для окна интерполяции").pack(anchor="w")
+        self.interpolate_window_divisor = ttk.Entry(left)
+        self.interpolate_window_divisor.insert(0, "10")
+        self.interpolate_window_divisor.pack(fill="x")
 
         ttk.Separator(left).pack(fill="x", pady=8)
         self.show_raw = tk.BooleanVar(value=True)
@@ -229,19 +233,27 @@ class AnalysisTab(ttk.Frame):
         try:
             processed = self.plotter.compute_data(
                 culture=culture,
+
                 fids=fids,
+
                 filter_neighbor_flag=self.filter_neighbor.get(),
                 neighbor_thresh=float(self.neigh_thresh.get()),
-                smooth=self.smooth.get(),
-                smooth_num=int(self.smooth_param.get()),
+
+                interpolate=self.interpolate.get(),
+                interpolate_num=int(self.interpolate_param.get()),
+                interpolate_window_divisor=int(self.interpolate_window_divisor.get()),
+
                 start_date=self.start_entry.get() or None,
                 end_date=self.end_entry.get() or None
             )
 
             fig, ax = self.plotter.plot_processed(
                 processed,
+
                 culture=culture,
+
                 fids=fids,
+
                 show_raw_points=self.show_raw.get(),
                 show_removed=self.show_removed.get(),
                 mean_curve=self.show_mean.get()
